@@ -152,7 +152,6 @@ class GraphExtractor:
             image = self.processing_step(image, line_ext[i])
 
         adj_matrix = self.build_adjacency_matrix(image)
-        features = np.bincount(adj_matrix.sum(axis=1))
         return adj_matrix
 
     @staticmethod
