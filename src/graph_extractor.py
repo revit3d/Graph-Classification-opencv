@@ -1,9 +1,9 @@
-from typing import Tuple, List
+from typing import Tuple, Literal, List
 
 import numpy as np
 
 import cv2
-from cv2.typing import MatLike
+from cv2.typing import MatLike, Point
 from skimage.morphology import skeletonize
 
 
@@ -11,7 +11,7 @@ class GraphExtractor:
     def __init__(self):
         pass
 
-    def binearize_image(self, image: MatLike) -> MatLike:
+    def binearize_image(self, image: MatLike, colorful: bool) -> MatLike:
         """
         Binearize image using standard thresholding, using preprocessing and \\
         post-processing techniques.
@@ -25,7 +25,13 @@ class GraphExtractor:
         image = cv2.medianBlur(image, 15)
 
         # binearization
-        _, image = cv2.threshold(image, 123, 255, cv2.THRESH_BINARY_INV)
+        if colorful:
+            _, image = cv2.threshold(image, 123, 255, cv2.THRESH_BINARY_INV)
+        else:
+            se = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 40))
+            bg = cv2.morphologyEx(image, cv2.MORPH_DILATE, se)
+            image = cv2.divide(image, bg, scale=255)
+            _, image = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
         # post-processing
         image = cv2.dilate(image, (3, 3), iterations=4)
@@ -93,7 +99,7 @@ class GraphExtractor:
         cv2.polylines(processed_image, approx, isClosed=False, color=1, thickness=1)
         return processed_image, approx
 
-    def build_adjacency_matrix(self, image: MatLike) -> np.ndarray:
+    def build_adjacency_matrix(self, image: MatLike) -> Tuple[MatLike, np.ndarray]:
         """
         Create adjacency matrix from binearized image consisting of \
         intersecting segments: graph edges
@@ -102,13 +108,55 @@ class GraphExtractor:
         -------
         image: binearized np.int8 array of shape (W, H)
         """
-        image, approx = self.approximate_lines(image, extension_length=40)
+        # extend lines further so there is more chance they will intersect
+        _, approx = self.approximate_lines(image, extension_length=30)
 
-        adj_matrix = np.zeros((len(approx), ) * 2, dtype=bool)
+        # create image representation of parsed graph
+        output_image = np.zeros((*image.shape, 3), dtype=np.uint8)
+        cv2.polylines(output_image, approx, isClosed=False, color=(0, 255, 0), thickness=8)
+
+        # find all intersection points and edges pairs
+        intersection_pts = []
+        intersecting_edges = []
+        intersect_num = np.zeros(len(approx), dtype=int)
         for i in range(len(approx)):
+            # add to check on leaf point
+            pt1, pt2 = approx[i]
+            intersection_pts.append(np.array(pt1[0]))
+            intersection_pts.append(np.array(pt2[0]))
+            intersecting_edges.append((i, ))
+            intersecting_edges.append((i, ))
+
+            # check for intersections
             for j in range(i + 1, len(approx)):
-                adj_matrix[i][j] = adj_matrix[j][i] = self.intersects(approx[i], approx[j])
-        return adj_matrix
+                pt = self.find_intersection(approx[i], approx[j])
+                if pt is not None:
+                    intersection_pts.append(pt)
+                    intersecting_edges.append((i, j))
+                    intersect_num[i] += 1
+                    intersect_num[j] += 1
+
+        # match similar intersection points into one vertex
+        vertices = {}
+        for i, pt in enumerate(intersection_pts):
+            is_unique = True
+            for v in vertices.keys():
+                if np.linalg.norm(pt - v) < 50:
+                    is_unique = False
+                    vertices[v].update(intersecting_edges[i])
+                    break
+            if is_unique:
+                vertices[tuple(pt)] = set(intersecting_edges[i])
+                cv2.circle(output_image, pt, radius=20, color=(0, 0, 255), thickness=-1)
+
+        # build adjacency matrix
+        adj_matrix = np.zeros((len(vertices), ) * 2, dtype=bool)
+        for i, v1_edges in enumerate(vertices.values()):
+            for j, v2_edges in enumerate(vertices.values()):
+                if len(v1_edges & v2_edges) > 0:
+                    adj_matrix[i][j] = True
+
+        return output_image, adj_matrix
 
     def processing_step(self, image: MatLike, extension_length: int | float = 5) -> MatLike:
         """
@@ -122,15 +170,15 @@ class GraphExtractor:
         extension_length: norm of extension of segments in pixels
         """
         image = self.detect_lines(image,
-                                  threshold=20,
-                                  minLineLength=40,
+                                  threshold=30,
+                                  minLineLength=30,
                                   maxLineGap=30)
         image, _ = self.approximate_lines(image,
-                                          curvature_thres=0.05,
+                                          curvature_thres=0.06,
                                           extension_length=extension_length)
         return image
 
-    def process_image(self, image: MatLike, steps: int = 3) -> np.ndarray:
+    def process_image(self, image: MatLike, steps: int = 2) -> Tuple[MatLike, np.ndarray]:
         """
         Extract graph from the image as adjacency matrix
 
@@ -141,23 +189,26 @@ class GraphExtractor:
         The increase of steps usually leads to better results, but can affect \
         performance.
         """
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2YCrCb)
+        hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        _, std = cv2.meanStdDev(hsv_image)
+
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
         image = cv2.split(image)[1]
 
-        image = self.binearize_image(image)
+        image = self.binearize_image(image, colorful=(std[1] > 40))
         image = skeletonize(image).astype(np.uint8)
 
         line_ext = [5, 5, 5]  # line extensions
         for i in range(steps):
             image = self.processing_step(image, line_ext[i])
 
-        adj_matrix = self.build_adjacency_matrix(image)
-        return adj_matrix
+        return self.build_adjacency_matrix(image)
 
     @staticmethod
-    def intersects(line1: np.ndarray, line2: np.ndarray) -> bool:
+    def find_intersection(line1: np.ndarray, line2: np.ndarray) -> Point | None:
         """
-        Function that checks whether two segments are intersecting or not. \\
+        Function that checks whether two segments are intersecting or not, \
+        and returns point of intersection if found any. \\
         Both parameters have shapes (2, 1, 2) where dim 1 represents two points, \\
         and dim 3 represents x and y respectively.
         """
@@ -176,14 +227,17 @@ class GraphExtractor:
         determinant = a1 * b2 - a2 * b1
 
         if determinant != 0:
-            intersect_x = (b2 * c1 - b1 * c2) / determinant
-            intersect_y = (a1 * c2 - a2 * c1) / determinant
+            intersect_x = int((b2 * c1 - b1 * c2) / determinant)
+            intersect_y = int((a1 * c2 - a2 * c1) / determinant)
 
             # chech if the intersection points lies on both segments
-            return (min(x1, x2) <= intersect_x <= max(x1, x2) and
-                    min(y1, y2) <= intersect_y <= max(y1, y2) and
-                    min(x3, x4) <= intersect_x <= max(x3, x4) and
-                    min(y3, y4) <= intersect_y <= max(y3, y4))
+            if (min(x1, x2) <= intersect_x <= max(x1, x2) and
+                min(y1, y2) <= intersect_y <= max(y1, y2) and
+                min(x3, x4) <= intersect_x <= max(x3, x4) and
+                min(y3, y4) <= intersect_y <= max(y3, y4)):
+                return np.array([intersect_x, intersect_y])
+            else:
+                return None
 
         # lines are parallel
-        return False
+        return None
