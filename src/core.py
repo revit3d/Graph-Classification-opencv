@@ -16,9 +16,12 @@ class ImageSegmentationApp:
 
         self.image = None
         self.features = None
-        self.feature_representations = [
-            
-        ]
+        self.feature_representations = np.array([
+            (3, 4, 3, 3, 0),    # 2.jpg
+            (4, 5, 4, 1, 0),    # 3.jpg
+            (4, 3, 5, 2, 1),    # 4.jpg
+            (6, 3, 4, 2, 0),    # 5.jpg
+        ])
 
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
@@ -128,7 +131,7 @@ class ImageSegmentationApp:
 
         extractor = GraphExtractor()
         output_image, adj_matrix = extractor.process_image(self.image)
-        self.features = np.bincount(adj_matrix.sum(axis=1))[1:]
+        self.features = np.bincount(adj_matrix.sum(axis=1) - 1)[1:]  # subtract 1 from diagonal
 
         path = self.write_path.get()
         if path is None or path == '':
@@ -154,7 +157,7 @@ class ImageSegmentationApp:
 
         dists = []
         for repr in self.feature_representations:
-            features = self.features
+            features = self.features.copy()
             diff = len(features) - len(repr)
             if diff > 0:
                 repr = np.pad(repr, (0, diff), mode='constant', constant_values=0)
